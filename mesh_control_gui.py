@@ -288,8 +288,14 @@ class ClientController:
                 try:
                     data, addr = self.control_socket.recvfrom(1024)
                     self.server_address = addr
-                    packet = json.loads(data.decode('utf-8'))
-                    self._handle_control_packet(packet)
+                    
+                    # Skip empty or non-JSON packets
+                    try:
+                        packet = json.loads(data.decode('utf-8'))
+                        self._handle_control_packet(packet)
+                    except json.JSONDecodeError:
+                        logger.debug(f"Received non-JSON packet from {addr}, ignoring")
+                        continue
                 except socket.timeout:
                     continue
                 except Exception as e:
@@ -300,6 +306,10 @@ class ClientController:
     def _handle_control_packet(self, packet):
         """Handle incoming control packet"""
         ptype = packet.get('type')
+        
+        # Skip handshake packets (just for connection verification)
+        if ptype == 'handshake':
+            return
         
         if ptype == 'mouse_move':
             dx, dy = packet.get('dx', 0), packet.get('dy', 0)
@@ -352,12 +362,15 @@ class ClientController:
             while self.running and self.config.get('clipboard_enabled', False):
                 try:
                     data, addr = self.clipboard_socket.recvfrom(4096)
-                    packet = json.loads(data.decode('utf-8'))
-                    
-                    if packet.get('type') == 'clipboard':
-                        content = packet.get('text', '')
-                        pyperclip.copy(content)
-                        logger.debug(f"Clipboard synced: {len(content)} chars")
+                    try:
+                        packet = json.loads(data.decode('utf-8'))
+                        if packet.get('type') == 'clipboard':
+                            content = packet.get('text', '')
+                            pyperclip.copy(content)
+                            logger.debug(f"Clipboard synced: {len(content)} chars")
+                    except json.JSONDecodeError:
+                        logger.debug(f"Received non-JSON clipboard packet, ignoring")
+                        continue
                 except socket.timeout:
                     continue
         except Exception as e:
@@ -684,7 +697,9 @@ class MeshControlGUI:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(2)
-            sock.sendto(b"ping", (client_ip, CONTROL_PORT))
+            # Send handshake packet as JSON
+            handshake = json.dumps({"type": "handshake"})
+            sock.sendto(handshake.encode('utf-8'), (client_ip, CONTROL_PORT))
             sock.close()
             
             self.conn_status_label.config(
