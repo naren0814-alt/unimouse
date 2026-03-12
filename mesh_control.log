@@ -24,3 +24,23 @@
 2026-03-12 19:21:58,791 - __main__ - INFO - Input capture started
 2026-03-12 19:21:58,791 - __main__ - INFO - Server started with screen size: 1536x864
 2026-03-12 19:21:58,791 - __main__ - INFO - Server mode activated
+2026-03-12 19:38:26,500 - __main__ - INFO - Discovery manager started
+2026-03-12 19:38:26,510 - __main__ - INFO - Server discovery listening on port 15050
+2026-03-12 19:38:26,522 - __main__ - INFO - Input capture started
+2026-03-12 19:38:26,523 - __main__ - INFO - Server return control listener started on port 17060
+2026-03-12 19:38:26,524 - __main__ - INFO - Server started with screen size: 1536x864
+2026-03-12 19:38:26,524 - __main__ - INFO - Server mode activated
+2026-03-12 19:43:58,343 - __main__ - INFO - Discovery manager started
+2026-03-12 19:43:58,345 - __main__ - INFO - Server discovery listening on port 15050
+2026-03-12 19:43:58,346 - __main__ - INFO - Server IP: 10.59.219.131
+2026-03-12 19:43:58,351 - __main__ - INFO - Input capture started
+2026-03-12 19:43:58,352 - __main__ - INFO - Server return control listener started on port 17060
+2026-03-12 19:43:58,352 - __main__ - INFO - Server started with screen size: 1536x864
+2026-03-12 19:43:58,352 - __main__ - INFO - Server mode activated
+2026-03-12 19:51:57,728 - __main__ - INFO - Discovery manager started
+2026-03-12 19:51:57,728 - __main__ - INFO - Server discovery listening on port 15050
+2026-03-12 19:51:57,728 - __main__ - INFO - Server IP: 10.59.219.131
+2026-03-12 19:51:57,746 - __main__ - INFO - Input capture started
+2026-03-12 19:51:57,746 - __main__ - INFO - Server return control listener started on port 17060
+2026-03-12 19:51:57,746 - __main__ - INFO - Server started with screen size: 1536x864
+2026-03-12 19:51:57,746 - __main__ - INFO - Server mode activated

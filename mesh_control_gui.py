@@ -27,6 +27,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 import os
+import subprocess
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -285,7 +286,9 @@ class DiscoveryManager:
             
             self.socket.settimeout(1.0)
             
+            server_ip = NetworkUtils.get_local_ip()
             logger.info(f"Server discovery listening on port {DISCOVERY_PORT}")
+            logger.info(f"Server IP: {server_ip}")
             
             while self.running:
                 try:
@@ -299,9 +302,11 @@ class DiscoveryManager:
                             'ip': packet['ip'],
                             'last_seen': datetime.now()
                         }
-                        logger.debug(f"Discovered client: {client_id}")
+                        logger.info(f"✓ Discovered client: {client_id} from {addr[0]}")
                 except socket.timeout:
                     pass
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Invalid discovery packet: {e}")
                 except Exception as e:
                     logger.warning(f"Error in discovery: {e}")
                 
@@ -322,7 +327,9 @@ class DiscoveryManager:
             local_ip = NetworkUtils.get_local_ip()
             
             logger.info(f"Client broadcasting presence: {hostname} at {local_ip}")
+            logger.info(f"Broadcasting to 255.255.255.255:{DISCOVERY_PORT} every {DISCOVERY_INTERVAL}s")
             
+            broadcast_count = 0
             while self.running:
                 try:
                     packet = {
@@ -332,9 +339,12 @@ class DiscoveryManager:
                     }
                     data = json.dumps(packet).encode('utf-8')
                     self.socket.sendto(data, (BROADCAST_ADDRESS, DISCOVERY_PORT))
+                    broadcast_count += 1
+                    logger.debug(f"Broadcast #{broadcast_count} sent to {BROADCAST_ADDRESS}:{DISCOVERY_PORT}")
                     time.sleep(DISCOVERY_INTERVAL)
                 except Exception as e:
                     logger.warning(f"Error broadcasting: {e}")
+                    time.sleep(DISCOVERY_INTERVAL)
         
         except Exception as e:
             logger.error(f"Client discovery error: {e}")
@@ -709,6 +719,27 @@ class ServerController:
         logger.info(f"Connected to client: {client_id}")
         return True
     
+    def connect_client_by_ip(self, ip, client_id):
+        """Connect to a client by manual IP address"""
+        if len(self.connected_clients) >= 2:
+            messagebox.warning("Warning", "Maximum 2 clients connected")
+            return False
+        
+        try:
+            control = ControlNetwork(ip, role='server')
+            control.register_callback('return_control', self._handle_return_control)
+            control.start()
+            
+            self.control_networks[client_id] = control
+            if client_id not in self.connected_clients:
+                self.connected_clients.append(client_id)
+            
+            logger.info(f"Connected to client by IP: {ip}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to {ip}: {e}")
+            return False
+    
     def disconnect_client(self, client_id):
         """Disconnect from a client"""
         if client_id in self.control_networks:
@@ -949,8 +980,24 @@ class MeshControlGUI:
     
     def _setup_ui(self):
         """Set up UI components"""
+        # Create a scrollable frame for everything
+        main_canvas = tk.Canvas(self.root)
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
+        scrollable_frame = ttk.Frame(main_canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+        )
+        
+        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        main_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        main_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
         # Title
-        title_frame = ttk.Frame(self.root)
+        title_frame = ttk.Frame(scrollable_frame)
         title_frame.pack(fill=tk.X, padx=10, pady=10)
         
         title_label = ttk.Label(title_frame, text="Mesh Control", 
@@ -958,7 +1005,7 @@ class MeshControlGUI:
         title_label.pack()
         
         # Mode Selection
-        mode_frame = ttk.LabelFrame(self.root, text="Mode Selection", padding=10)
+        mode_frame = ttk.LabelFrame(scrollable_frame, text="Mode Selection", padding=10)
         mode_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.mode_var = tk.StringVar(value="server")
@@ -968,7 +1015,7 @@ class MeshControlGUI:
                        value="client").pack(anchor=tk.W)
         
         # Status Area
-        status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
+        status_frame = ttk.LabelFrame(scrollable_frame, text="Status", padding=10)
         status_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.status_label = ttk.Label(status_frame, text="Stopped", 
@@ -976,26 +1023,104 @@ class MeshControlGUI:
         self.status_label.pack(anchor=tk.W)
         
         # Connection Status
-        conn_frame = ttk.LabelFrame(self.root, text="Connection Status", padding=10)
+        conn_frame = ttk.LabelFrame(scrollable_frame, text="Connection Status", padding=10)
         conn_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.conn_status_label = ttk.Label(conn_frame, text="Not connected")
         self.conn_status_label.pack(anchor=tk.W)
         
+        # Network Info (Diagnostic)
+        self.network_info_label = ttk.Label(conn_frame, text="", font=("Arial", 8), foreground="gray")
+        self.network_info_label.pack(anchor=tk.W)
+        
+        # Manual IP Connection
+        manual_ip_frame = ttk.LabelFrame(scrollable_frame, text="Manual Client IP Connection", padding=10)
+        manual_ip_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ip_input_frame = ttk.Frame(manual_ip_frame)
+        ip_input_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(ip_input_frame, text="Client IP:").pack(side=tk.LEFT, padx=5)
+        self.manual_ip_var = tk.StringVar()
+        self.manual_ip_entry = ttk.Entry(ip_input_frame, textvariable=self.manual_ip_var, width=20)
+        self.manual_ip_entry.pack(side=tk.LEFT, padx=5)
+        
+        self.connect_ip_btn = ttk.Button(manual_ip_frame, text="Connect by IP",
+                                        command=self._on_connect_by_ip,
+                                        state=tk.DISABLED)
+        self.connect_ip_btn.pack(py=5)
+        
+        self.manual_ip_status_label = ttk.Label(manual_ip_frame, text="", 
+                                               font=("Arial", 8), foreground="blue")
+        self.manual_ip_status_label.pack(anchor=tk.W)
+        
         # Discovered Clients
-        clients_frame = ttk.LabelFrame(self.root, text="Discovered Clients", padding=10)
+        clients_frame = ttk.LabelFrame(scrollable_frame, text="Discovered Clients", padding=10)
         clients_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # Listbox with scrollbar
         scrollbar = ttk.Scrollbar(clients_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.clients_listbox = tk.Listbox(clients_frame, yscrollcommand=scrollbar.set)
+        self.clients_listbox = tk.Listbox(clients_frame, yscrollcommand=scrollbar.set, height=6)
         self.clients_listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.clients_listbox.yview)
         
+        self.discovery_timeout_label = ttk.Label(clients_frame, text="", 
+                                                 font=("Arial", 8), foreground="orange")
+        self.discovery_timeout_label.pack(anchor=tk.W)
+        
+        # Client Network Settings
+        client_settings_frame = ttk.LabelFrame(scrollable_frame, text="Client Network Settings", padding=10)
+        client_settings_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.client_ip_label = ttk.Label(client_settings_frame, text="IP Address: Not set")
+        self.client_ip_label.pack(anchor=tk.W)
+        
+        self.client_adapter_label = ttk.Label(client_settings_frame, text="Network Adapter: Unknown")
+        self.client_adapter_label.pack(anchor=tk.W)
+        
+        self.discovery_mode_label = ttk.Label(client_settings_frame, text="Discovery Mode: Disabled")
+        self.discovery_mode_label.pack(anchor=tk.W)
+        
+        self.enable_discovery_btn = ttk.Button(client_settings_frame, text="Enable Discovery Mode",
+                                              command=self._on_enable_discovery,
+                                              state=tk.DISABLED)
+        self.enable_discovery_btn.pack(py=5)
+        
+        # Server Diagnostics
+        server_diag_frame = ttk.LabelFrame(scrollable_frame, text="Server Network Diagnostics", padding=10)
+        server_diag_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.server_ip_label = ttk.Label(server_diag_frame, text="Server IP: Not set")
+        self.server_ip_label.pack(anchor=tk.W)
+        
+        self.server_subnet_label = ttk.Label(server_diag_frame, text="Subnet Mask: Unknown")
+        self.server_subnet_label.pack(anchor=tk.W)
+        
+        diag_button_frame = ttk.Frame(server_diag_frame)
+        diag_button_frame.pack(fill=tk.X, pady=10)
+        
+        self.scan_network_btn = ttk.Button(diag_button_frame, text="Scan Network",
+                                          command=self._on_scan_network,
+                                          state=tk.DISABLED)
+        self.scan_network_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.ping_client_btn = ttk.Button(diag_button_frame, text="Ping Selected",
+                                         command=self._on_ping_selected,
+                                         state=tk.DISABLED)
+        self.ping_client_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.show_network_info_btn = ttk.Button(diag_button_frame, text="Network Info",
+                                               command=self._on_show_network_info)
+        self.show_network_info_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.diag_status_label = ttk.Label(server_diag_frame, text="", 
+                                          font=("Arial", 8), foreground="green")
+        self.diag_status_label.pack(anchor=tk.W)
+        
         # Control Indicator
-        control_frame = ttk.LabelFrame(self.root, text="Current Control", padding=10)
+        control_frame = ttk.LabelFrame(scrollable_frame, text="Current Control", padding=10)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.control_label = ttk.Label(control_frame, text="Server", 
@@ -1004,7 +1129,7 @@ class MeshControlGUI:
         self.control_label.pack()
         
         # Buttons
-        button_frame = ttk.Frame(self.root)
+        button_frame = ttk.Frame(scrollable_frame)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
         self.start_btn = ttk.Button(button_frame, text="Start",
@@ -1019,6 +1144,10 @@ class MeshControlGUI:
                                      command=self._on_connect_client,
                                      state=tk.DISABLED)
         self.connect_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.diag_btn = ttk.Button(button_frame, text="Network Diagnostics",
+                                  command=self._on_diagnostics)
+        self.diag_btn.pack(side=tk.LEFT, padx=5)
     
     def _on_start(self):
         """Start based on mode selection"""
@@ -1034,10 +1163,20 @@ class MeshControlGUI:
         self.server.start()
         self.running_mode = 'server'
         
+        # Show network info
+        server_ip = NetworkUtils.get_local_ip()
+        self.network_info_label.config(
+            text=f"Server IP: {server_ip} | Discovery Port: {DISCOVERY_PORT} | Listening for clients..."
+        )
+        self.server_ip_label.config(text=f"Server IP: {server_ip}")
+        
         self.status_label.config(text="Server running...")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.connect_btn.config(state=tk.NORMAL)
+        self.scan_network_btn.config(state=tk.NORMAL)
+        self.ping_client_btn.config(state=tk.NORMAL)
+        self.connect_ip_btn.config(state=tk.NORMAL)
         
         # Disable mode selection
         for child in self.root.winfo_children():
@@ -1046,6 +1185,10 @@ class MeshControlGUI:
                     if isinstance(subchild, ttk.Radiobutton):
                         subchild.config(state=tk.DISABLED)
         
+        # Start 5-second discovery timeout
+        self.discovery_timeout_label.config(text="Scanning for clients (5 sec)...", foreground="blue")
+        self.root.after(5000, self._check_discovery_timeout)
+        
         logger.info("Server mode activated")
     
     def _on_start_client(self):
@@ -1053,6 +1196,16 @@ class MeshControlGUI:
         self.client = ClientController(self)
         self.client.start()
         self.running_mode = 'client'
+        
+        # Show network info
+        client_ip = NetworkUtils.get_local_ip()
+        hostname = NetworkUtils.get_hostname()
+        self.network_info_label.config(
+            text=f"Client IP: {client_ip} | Hostname: {hostname} | Broadcasting..."
+        )
+        self.client_ip_label.config(text=f"IP Address: {client_ip}")
+        self.discovery_mode_label.config(text=f"Discovery Mode: Enabled", foreground="green")
+        self.enable_discovery_btn.config(state=tk.NORMAL)
         
         self.status_label.config(text="Client running...")
         self.start_btn.config(state=tk.DISABLED)
@@ -1079,9 +1232,23 @@ class MeshControlGUI:
         
         self.running_mode = None
         self.status_label.config(text="Stopped")
+        self.network_info_label.config(text="")
+        self.conn_status_label.config(text="Not connected")
+        self.manual_ip_status_label.config(text="")
+        self.discovery_timeout_label.config(text="")
+        self.diag_status_label.config(text="")
+        self.client_ip_label.config(text="IP Address: Not set")
+        self.discovery_mode_label.config(text="Discovery Mode: Disabled")
+        self.server_ip_label.config(text="Server IP: Not set")
+        self.server_subnet_label.config(text="Subnet Mask: Unknown")
+        
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.connect_btn.config(state=tk.DISABLED)
+        self.scan_network_btn.config(state=tk.DISABLED)
+        self.ping_client_btn.config(state=tk.DISABLED)
+        self.connect_ip_btn.config(state=tk.DISABLED)
+        self.enable_discovery_btn.config(state=tk.DISABLED)
         
         # Re-enable mode selection
         for child in self.root.winfo_children():
@@ -1133,6 +1300,182 @@ class MeshControlGUI:
         }.get(control, control)
         
         self.control_label.config(text=control_text)
+    
+    def _on_diagnostics(self):
+        """Show network diagnostics dialog"""
+        import subprocess
+        
+        diag_info = "=== Mesh Control Network Diagnostics ===\n\n"
+        
+        # Get local IP
+        local_ip = NetworkUtils.get_local_ip()
+        hostname = NetworkUtils.get_hostname()
+        diag_info += f"Your Computer:\n"
+        diag_info += f"  Hostname: {hostname}\n"
+        diag_info += f"  IP Address: {local_ip}\n\n"
+        
+        # Try to get full network info
+        try:
+            result = subprocess.run(
+                ['ipconfig'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            diag_info += "Full Network Configuration:\n"
+            # Filter to show only relevant info
+            lines = result.stdout.split('\n')
+            for i, line in enumerate(lines):
+                if any(x in line for x in ['Adapter', 'IPv4', 'Subnet Mask', 'Default Gateway', 'DHCP']):
+                    diag_info += line + "\n"
+        except Exception as e:
+            diag_info += f"Could not retrieve full config: {e}\n"
+        
+        diag_info += f"\n=== Mesh Control Config ===\n"
+        diag_info += f"Discovery Port: {DISCOVERY_PORT}\n"
+        diag_info += f"Control Port: {CONTROL_PORT}\n"
+        diag_info += f"Return Control Port: {CONTROL_PORT + 1000}\n"
+        diag_info += f"Broadcast Address: {BROADCAST_ADDRESS}\n"
+        
+        # Show in messagebox
+        messagebox.showinfo("Network Diagnostics", diag_info)
+    
+    def _on_connect_by_ip(self):
+        """Connect to a client using manual IP address"""
+        ip = self.manual_ip_var.get().strip()
+        
+        if not ip:
+            messagebox.showwarning("Warning", "Please enter a client IP address")
+            return
+        
+        # Validate IP format
+        parts = ip.split('.')
+        if len(parts) != 4 or not all(part.isdigit() for part in parts):
+            messagebox.showerror("Error", "Invalid IP address format")
+            return
+        
+        if not self.server:
+            messagebox.showerror("Error", "Server not running")
+            return
+        
+        try:
+            # Create a fake client entry for manual connection
+            client_id = f"Manual-{ip}"
+            if self.server.connect_client_by_ip(ip, client_id):
+                self.manual_ip_status_label.config(
+                    text=f"✓ Connected to {ip}",
+                    foreground="green"
+                )
+                messagebox.showinfo("Success", f"Connected to {ip}")
+            else:
+                self.manual_ip_status_label.config(
+                    text=f"✗ Failed to connect to {ip}",
+                    foreground="red"
+                )
+                messagebox.showerror("Error", f"Failed to connect to {ip}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Connection error: {e}")
+            logger.error(f"Manual IP connection error: {e}")
+    
+    def _on_enable_discovery(self):
+        """Enable/toggle client discovery broadcasting"""
+        if not self.client:
+            messagebox.showerror("Error", "Client not running")
+            return
+        
+        # For now, discovery is automatically enabled
+        # This button could be used to restart discovery or show status
+        messagebox.showinfo("Discovery Mode", "Client is broadcasting its presence every 2 seconds")
+    
+    def _on_scan_network(self):
+        """Rescan the network for clients"""
+        if not self.server:
+            messagebox.showwarning("Warning", "Server not running")
+            return
+        
+        self.diag_status_label.config(text="Scanning network...", foreground="blue")
+        self.server.discovery.discovered_clients.clear()
+        self.clients_listbox.delete(0, tk.END)
+        
+        # The discovery manager will find clients automatically
+        # Give it 3 seconds to discover
+        self.root.after(3000, self._scan_complete)
+    
+    def _scan_complete(self):
+        """Called when scan completes"""
+        clients = self.server.discovery.get_discovered_clients()
+        if clients:
+            self.diag_status_label.config(text=f"✓ Found {len(clients)} client(s)", foreground="green")
+        else:
+            self.diag_status_label.config(text="✗ No clients found", foreground="orange")
+    
+    def _on_ping_selected(self):
+        """Ping the selected client in the listbox"""
+        selection = self.clients_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a client first")
+            return
+        
+        client_id = self.clients_listbox.get(selection[0])
+        clients = self.server.discovery.discovered_clients
+        
+        if client_id not in clients:
+            messagebox.showerror("Error", "Client not found")
+            return
+        
+        client_ip = clients[client_id]['ip']
+        self.diag_status_label.config(text=f"Pinging {client_ip}...", foreground="blue")
+        self.root.update()
+        
+        try:
+            result = subprocess.run(
+                ['ping', '-n', '1', client_ip],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                self.diag_status_label.config(
+                    text=f"✓ {client_id} is reachable",
+                    foreground="green"
+                )
+                messagebox.showinfo("Ping Result", f"✓ {client_ip} is reachable")
+            else:
+                self.diag_status_label.config(
+                    text=f"✗ {client_id} is unreachable",
+                    foreground="red"
+                )
+                messagebox.showwarning("Ping Result", f"✗ {client_ip} is unreachable (100% packet loss)")
+        except Exception as e:
+            messagebox.showerror("Error", f"Ping failed: {e}")
+            logger.error(f"Ping error: {e}")
+    
+    def _on_show_network_info(self):
+        """Show detailed network information"""
+        try:
+            result = subprocess.run(
+                ['ipconfig', '/all'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            info = "Network Configuration (extract):\n\n"
+            lines = result.stdout.split('\n')
+            
+            in_adapter = False
+            for line in lines:
+                if 'adapter' in line.lower():
+                    in_adapter = True
+                    info += f"\n{line}\n"
+                elif in_adapter and any(x in line for x in ['IPv4', 'Subnet Mask', 'Default Gateway', 'DHCP']):
+                    info += line + "\n"
+                elif in_adapter and line.strip() == "":
+                    in_adapter = False
+            
+            messagebox.showinfo("Network Information", info)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not retrieve network info: {e}")
 
 # ============================================================================
 # MAIN APPLICATION
