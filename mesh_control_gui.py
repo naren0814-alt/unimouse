@@ -1048,7 +1048,7 @@ class MeshControlGUI:
         self.connect_ip_btn = ttk.Button(manual_ip_frame, text="Connect by IP",
                                         command=self._on_connect_by_ip,
                                         state=tk.DISABLED)
-        self.connect_ip_btn.pack(py=5)
+        self.connect_ip_btn.pack(pady=5)
         
         self.manual_ip_status_label = ttk.Label(manual_ip_frame, text="", 
                                                font=("Arial", 8), foreground="blue")
@@ -1086,7 +1086,7 @@ class MeshControlGUI:
         self.enable_discovery_btn = ttk.Button(client_settings_frame, text="Enable Discovery Mode",
                                               command=self._on_enable_discovery,
                                               state=tk.DISABLED)
-        self.enable_discovery_btn.pack(py=5)
+        self.enable_discovery_btn.pack(pady=5)
         
         # Server Diagnostics
         server_diag_frame = ttk.LabelFrame(scrollable_frame, text="Server Network Diagnostics", padding=10)
