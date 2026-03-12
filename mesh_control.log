@@ -67,3 +67,6 @@
 2026-03-12 21:06:14,165 - __main__ - INFO - Server started, forwarding to 10.59.219.76
 2026-03-12 21:06:14,181 - __main__ - INFO - Server started, controlling 10.59.219.76
 2026-03-12 21:08:13,125 - __main__ - INFO - Stopped
+2026-03-12 21:11:59,539 - __main__ - INFO - Client started, listening for control...
+2026-03-12 21:11:59,539 - __main__ - INFO - Control listener on port 6060
+2026-03-12 21:11:59,539 - __main__ - INFO - Client started, listening for control...
