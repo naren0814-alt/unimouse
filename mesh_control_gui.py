@@ -5,7 +5,7 @@ import threading
 import time
 from pynput import mouse, keyboard
 
-PORT = 6060
+PORT = 45000
 BUFFER_SIZE = 1024
 
 user32 = ctypes.windll.user32
@@ -116,7 +116,20 @@ def set_cursor_position(x, y):
 def run_client():
     """Run client - receives and executes remote input"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", PORT))
+    
+    # Allow socket reuse to avoid "Address already in use" errors
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    try:
+        sock.bind(("", PORT))
+    except OSError as e:
+        print(f"[CLIENT] Error: Port {PORT} is already in use.")
+        print(f"[CLIENT] Possible solutions:")
+        print(f"  1. Close other instances of this program")
+        print(f"  2. Wait 60 seconds and try again (port in TIME_WAIT)")
+        print(f"  3. Use 'netstat -ano | findstr :{PORT}' to find the process")
+        return
+    
     sock.settimeout(None)
 
     print(f"[CLIENT] Listening on port {PORT}...")
