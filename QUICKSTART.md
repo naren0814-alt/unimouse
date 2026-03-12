@@ -5,7 +5,7 @@
 ### Prerequisites
 - Python 3.11+ installed on all computers
 - All computers on the same Wi-Fi or LAN
-- User account with administrator privileges
+- No special administrator privileges required
 
 ### Installation (All Computers)
 
@@ -76,6 +76,8 @@ Move to the **left edge** of any client screen to return to the server.
 
 3. Restart Mesh Control on both computers
 
+4. Check if another application is using ports 15050, 16060, 17060
+
 ### "Input not working when moved to client"
 
 1. Try moving the mouse back toward the center
@@ -137,8 +139,9 @@ While server is running:
 **Discovery Broadcast Interval**: 2 seconds  
 **Client Timeout**: 10 seconds  
 **Cursor Edge Threshold**: 5 pixels  
-**Control Ports**: 6060, 6061  
-**Discovery Port**: 5050  
+**Discovery Port**: 15050 UDP  
+**Control Port**: 16060 UDP  
+**Return Control Port**: 17060 UDP  
 
 To change these, edit the constants at the top of `mesh_control_gui.py`:
 

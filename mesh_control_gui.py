@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # GLOBAL CONFIGURATION
 # ============================================================================
 
-DISCOVERY_PORT = 5050
-CONTROL_PORT = 6060
+DISCOVERY_PORT = 15050  # Changed from 5050 to avoid privilege requirements
+CONTROL_PORT = 16060    # Changed from 6060 to avoid privilege requirements
 DISCOVERY_INTERVAL = 2.0  # seconds
 CLIENT_HEARTBEAT_TIMEOUT = 10.0  # seconds
 CURSOR_EDGE_THRESHOLD = 5  # pixels from edge to trigger switch
@@ -379,27 +379,19 @@ class ControlNetwork:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         if self.role == 'client':
-            # Client listens for control packets
+            # Client listens for control packets from server
             try:
                 self.socket.bind(('', CONTROL_PORT))
                 self.socket.settimeout(1.0)
                 self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
                 self.listen_thread.start()
-                logger.info(f"Client listening on port {CONTROL_PORT}")
+                logger.info(f"Client listening on port {CONTROL_PORT} for incoming control packets")
             except OSError as e:
                 logger.error(f"Failed to bind client to port {CONTROL_PORT}: {e}")
-                logger.info("NOTE: You may need to run the application as Administrator")
         else:
-            # Server listens for return_control packets
-            try:
-                self.socket.bind(('', CONTROL_PORT + 1))
-                self.socket.settimeout(1.0)
-                self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
-                self.listen_thread.start()
-                logger.info(f"Server listening on port {CONTROL_PORT + 1}")
-            except OSError as e:
-                logger.error(f"Failed to bind server to port {CONTROL_PORT + 1}: {e}")
-                logger.info("NOTE: You may need to run the application as Administrator")
+            # Server only sends to clients, doesn't need to bind
+            # It will send return_control packets via a separate mechanism
+            logger.info(f"Server control network ready to send packets to {self.client_ip}")
     
     def stop(self):
         """Stop control network"""
@@ -449,16 +441,15 @@ class ControlNetwork:
         
         try:
             # Send to the server IP if known, otherwise send to host that sent control
-            # For now, we'll use a well-known port for return control
             if self.server_ip:
                 data = json.dumps({'type': 'return_control'}).encode('utf-8')
-                self.socket.sendto(data, (self.server_ip, CONTROL_PORT + 1))
+                self.socket.sendto(data, (self.server_ip, CONTROL_PORT + 1000))
             else:
                 # Broadcast as fallback
                 data = json.dumps({'type': 'return_control'}).encode('utf-8')
-                self.socket.sendto(data, (BROADCAST_ADDRESS, CONTROL_PORT + 1))
+                self.socket.sendto(data, (BROADCAST_ADDRESS, CONTROL_PORT + 1000))
         except Exception as e:
-            logger.warning(f"Error sending return control: {e}")
+            logger.debug(f"Error sending return control: {e}")
     
     def register_callback(self, event_type, callback):
         """Register callback for event"""
@@ -640,6 +631,8 @@ class ServerController:
         self.screen_width = 1920  # Will be updated
         self.screen_height = 1080  # Will be updated
         self.running = False
+        self.return_control_socket = None
+        self.return_control_thread = None
     
     def start(self):
         """Start server"""
@@ -663,6 +656,9 @@ class ServerController:
         self.input_capture.on_key_press(self._on_key_press)
         self.input_capture.on_key_release(self._on_key_release)
         
+        # Start return control listener
+        self._start_return_control_listener()
+        
         # Schedule GUI updates from main thread
         if self.gui and hasattr(self.gui, 'root'):
             try:
@@ -677,6 +673,14 @@ class ServerController:
         self.running = False
         self.discovery.stop()
         self.input_capture.stop()
+        
+        # Stop return control listener
+        if self.return_control_socket:
+            try:
+                self.return_control_socket.close()
+            except:
+                pass
+        
         for ctrl in self.control_networks.values():
             ctrl.stop()
         self.control_networks.clear()
@@ -727,6 +731,39 @@ class ServerController:
             
             self.gui.update_control_indicator(self.current_control)
             logger.info(f"Control switched to {self.current_control}")
+    
+    def _start_return_control_listener(self):
+        """Start listening for return control packets from clients"""
+        try:
+            self.return_control_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.return_control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.return_control_socket.bind(('', CONTROL_PORT + 1000))  # Use high port number
+            self.return_control_socket.settimeout(1.0)
+            
+            self.return_control_thread = threading.Thread(
+                target=self._return_control_listen_loop,
+                daemon=True
+            )
+            self.return_control_thread.start()
+            logger.info(f"Server return control listener started on port {CONTROL_PORT + 1000}")
+        except OSError as e:
+            logger.warning(f"Could not start return control listener: {e}")
+    
+    def _return_control_listen_loop(self):
+        """Listen for return control packets from clients"""
+        while self.running:
+            try:
+                data, addr = self.return_control_socket.recvfrom(1024)
+                packet = json.loads(data.decode('utf-8'))
+                
+                if isinstance(packet, dict) and packet.get('type') == 'return_control':
+                    self._handle_return_control()
+                    logger.debug(f"Received return control from {addr[0]}")
+            except socket.timeout:
+                pass
+            except Exception as e:
+                if self.running:
+                    logger.debug(f"Error in return control listen loop: {e}")
     
     def _on_mouse_move(self, x, y, dx, dy):
         """Handle mouse movement"""

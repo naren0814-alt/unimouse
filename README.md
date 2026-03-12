@@ -78,9 +78,9 @@ The system works like a wireless multi-screen setup:
 
 ### Default Ports
 
-- **Discovery Port**: 5050 (UDP broadcast)
-- **Control Port**: 6060 (UDP input forwarding)
-- **Return Control Port**: 6061 (UDP return signal)
+- **Discovery Port**: 15050 (UDP broadcast)
+- **Control Port**: 16060 (UDP input forwarding to clients)
+- **Return Control Port**: 17060 (UDP return signal from clients)
 
 ### Broadcast Packets
 
