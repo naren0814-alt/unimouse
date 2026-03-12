@@ -44,3 +44,22 @@
 2026-03-12 19:51:57,746 - __main__ - INFO - Server return control listener started on port 17060
 2026-03-12 19:51:57,746 - __main__ - INFO - Server started with screen size: 1536x864
 2026-03-12 19:51:57,746 - __main__ - INFO - Server mode activated
+2026-03-12 20:46:29,828 - __main__ - INFO - Discovery manager started
+2026-03-12 20:46:29,829 - __main__ - INFO - Server discovery listening on port 15050
+2026-03-12 20:46:29,835 - __main__ - INFO - Server IP: 10.59.219.131
+2026-03-12 20:46:29,837 - __main__ - INFO - Input capture started
+2026-03-12 20:46:29,837 - __main__ - INFO - Server return control listener started on port 17060
+2026-03-12 20:46:29,837 - __main__ - INFO - Server started with screen size: 1536x864
+2026-03-12 20:47:01,624 - __main__ - INFO - Server control network ready to send packets to 10.59.219.76
+2026-03-12 20:47:01,624 - __main__ - INFO - Connected to client by IP: 10.59.219.76
+2026-03-12 20:47:41,827 - __main__ - INFO - Server control network ready to send packets to 10.59.219.76
+2026-03-12 20:47:41,834 - __main__ - INFO - Connected to client by IP: 10.59.219.76
+2026-03-12 20:47:48,723 - __main__ - WARNING - Error in discovery: [WinError 10038] An operation was attempted on something that is not a socket
+2026-03-12 20:47:48,723 - __main__ - INFO - Server stopped
+2026-03-12 20:47:48,726 - __main__ - INFO - Stopped
+2026-03-12 20:48:13,462 - __main__ - INFO - Discovery manager started
+2026-03-12 20:48:13,462 - __main__ - INFO - Client broadcasting presence: Arctic_Inspiron at 10.59.219.131
+2026-03-12 20:48:13,462 - __main__ - INFO - Broadcasting to 255.255.255.255:15050 every 2.0s
+2026-03-12 20:48:13,462 - __main__ - INFO - Client listening on port 16060 for incoming control packets
+2026-03-12 20:48:13,478 - __main__ - INFO - Client started
+2026-03-12 20:48:13,478 - __main__ - INFO - Client mode activated
