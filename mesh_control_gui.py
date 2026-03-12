@@ -1,15 +1,18 @@
 """
-Mesh Control - Windows-to-Windows Multi-Computer Control Application
+Mesh Control - Windows-to-Windows Desktop Application
 
-A Python application that allows one computer (server) to control up to two other 
-computers (clients) using a single keyboard and mouse over a local network.
+A Python application that allows one Windows laptop (server) to control 
+another laptop (client) using a single keyboard, mouse, and shared clipboard 
+over the local network.
 
 Features:
-- Automatic client discovery via UDP broadcast
-- Smooth cursor edge switching between computers
+- Manual client IP input (no auto-discovery)
+- Smooth cursor edge switching between displays
+- Keyboard and mouse control sharing
+- Clipboard synchronization
+- Modern Tkinter GUI with dark theme
 - Low-latency UDP networking
 - Windows native input injection
-- Tkinter-based GUI
 """
 
 import sys
@@ -24,10 +27,10 @@ from ctypes import Structure, POINTER, c_int, c_uint, c_char_p, c_ulonglong, Uni
 from pynput import mouse, keyboard
 from pynput.keyboard import Key
 import logging
+import pyperclip
 from collections import defaultdict
 from datetime import datetime, timedelta
 import os
-import subprocess
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -47,12 +50,10 @@ logger = logging.getLogger(__name__)
 # GLOBAL CONFIGURATION
 # ============================================================================
 
-DISCOVERY_PORT = 15050  # Changed from 5050 to avoid privilege requirements
-CONTROL_PORT = 16060    # Changed from 6060 to avoid privilege requirements
-DISCOVERY_INTERVAL = 2.0  # seconds
-CLIENT_HEARTBEAT_TIMEOUT = 10.0  # seconds
-CURSOR_EDGE_THRESHOLD = 5  # pixels from edge to trigger switch
-BROADCAST_ADDRESS = '255.255.255.255'
+CONTROL_PORT = 6060          # UDP port for mouse/keyboard control
+CLIPBOARD_PORT = 6061        # UDP port for clipboard sync
+CURSOR_EDGE_THRESHOLD = 5    # pixels from edge to trigger cursor switch
+CLIPBOARD_CHECK_INTERVAL = 0.5  # seconds
 
 # ============================================================================
 # WINDOWS API BINDINGS (CTYPES)
@@ -81,7 +82,6 @@ class INPUT(Structure):
 # Windows API constants
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
-INPUT_HARDWARE = 2
 
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -90,11 +90,9 @@ MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
-MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_WHEEL = 0x0800
 
 KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_UNICODE = 0x0004
 
 # Virtual key codes
 VK_CODES = {
@@ -113,6 +111,10 @@ VK_CODES = {
     Key.delete: 0x2E,
 }
 
+# ============================================================================
+# WINDOWS INPUT INJECTION
+# ============================================================================
+
 class WindowsInput:
     """Windows input injection via ctypes"""
     
@@ -122,6 +124,11 @@ class WindowsInput:
         pos = POINT()
         ctypes.windll.user32.GetCursorPos(ctypes.byref(pos))
         return (pos.x, pos.y)
+    
+    @staticmethod
+    def set_cursor_position(x, y):
+        """Set cursor to absolute position"""
+        ctypes.windll.user32.SetCursorPos(x, y)
     
     @staticmethod
     def send_input(input_obj):
@@ -162,7 +169,6 @@ class WindowsInput:
         if key in VK_CODES:
             return VK_CODES[key]
         
-        # Try to extract character
         try:
             if isinstance(key, str):
                 return ord(key.upper())
@@ -170,9 +176,6 @@ class WindowsInput:
                 char = key.char
                 if char and len(char) == 1 and ord(char) < 256:
                     return ord(char.upper())
-            elif hasattr(key, 'vk'):
-                # Some pynput keys have vk attribute
-                return key.vk
         except:
             pass
         
@@ -204,25 +207,24 @@ class WindowsInput:
         input_obj = INPUT(INPUT_KEYBOARD, input_union)
         WindowsInput.send_input(input_obj)
 
+    @staticmethod
+    def show_cursor(show=True):
+        """Show or hide cursor"""
+        ctypes.windll.user32.ShowCursor(show)
+    
+    @staticmethod
+    def get_screen_resolution():
+        """Get screen resolution"""
+        width = ctypes.windll.user32.GetSystemMetrics(0)
+        height = ctypes.windll.user32.GetSystemMetrics(1)
+        return (width, height)
+
 # ============================================================================
 # NETWORK UTILITIES
 # ============================================================================
 
 class NetworkUtils:
-    """Network utilities for discovery and communication"""
-    
-    @staticmethod
-    def get_local_ip():
-        """Get local IP address"""
-        try:
-            # Connect to external host to determine local IP
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except:
-            return "127.0.0.1"
+    """Network utilities"""
     
     @staticmethod
     def get_hostname():
@@ -230,998 +232,530 @@ class NetworkUtils:
         return socket.gethostname()
 
 # ============================================================================
-# DISCOVERY SYSTEM
+# CLIENT LOGIC
 # ============================================================================
 
-class DiscoveryManager:
-    """Manages client discovery via UDP broadcast"""
+class ClientController:
+    """Client mode - receives and applies input from server"""
     
-    def __init__(self, mode='server'):
-        self.mode = mode
-        self.discovered_clients = {}  # {client_id: {hostname, ip, last_seen}}
+    def __init__(self, config=None):
+        self.config = config or {}
         self.running = False
-        self.socket = None
-        self.thread = None
-    
+        self.control_socket = None
+        self.clipboard_socket = None
+        self.last_clipboard = ""
+        self.server_address = None
+        
     def start(self):
-        """Start discovery"""
+        """Start client server"""
         self.running = True
-        self.thread = threading.Thread(target=self._discovery_loop, daemon=True)
-        self.thread.start()
-        logger.info("Discovery manager started")
+        
+        # Start control listener
+        control_thread = threading.Thread(target=self._control_listen_loop, daemon=True)
+        control_thread.start()
+        
+        # Start clipboard sync
+        clipboard_thread = threading.Thread(target=self._clipboard_sync_loop, daemon=True)
+        clipboard_thread.start()
+        
+        logger.info("Client started, listening for control...")
     
     def stop(self):
-        """Stop discovery"""
+        """Stop client"""
         self.running = False
-        if self.socket:
+        if self.control_socket:
             try:
-                self.socket.close()
+                self.control_socket.close()
+            except:
+                pass
+        if self.clipboard_socket:
+            try:
+                self.clipboard_socket.close()
             except:
                 pass
     
-    def _discovery_loop(self):
-        """Main discovery loop"""
-        if self.mode == 'server':
-            self._server_discovery_loop()
-        else:
-            self._client_discovery_loop()
-    
-    def _server_discovery_loop(self):
-        """Server listening for client broadcasts"""
+    def _control_listen_loop(self):
+        """Listen for control packets"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                # Try to set SO_EXCLUSIVEADDRUSE on Windows to avoid conflicts
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            except (AttributeError, OSError):
-                pass  # Not available on all systems
+            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.control_socket.bind(('0.0.0.0', CONTROL_PORT))
+            self.control_socket.settimeout(1.0)
             
-            try:
-                self.socket.bind(('', DISCOVERY_PORT))
-            except OSError as e:
-                logger.error(f"Failed to bind to port {DISCOVERY_PORT}: {e}")
-                logger.info("NOTE: You may need to run the application as Administrator")
-                return
-            
-            self.socket.settimeout(1.0)
-            
-            server_ip = NetworkUtils.get_local_ip()
-            logger.info(f"Server discovery listening on port {DISCOVERY_PORT}")
-            logger.info(f"Server IP: {server_ip}")
+            logger.info(f"Control listener on port {CONTROL_PORT}")
             
             while self.running:
                 try:
-                    data, addr = self.socket.recvfrom(1024)
+                    data, addr = self.control_socket.recvfrom(1024)
+                    self.server_address = addr
+                    packet = json.loads(data.decode('utf-8'))
+                    self._handle_control_packet(packet)
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    logger.error(f"Control receive error: {e}")
+        except Exception as e:
+            logger.error(f"Control listen error: {e}")
+    
+    def _handle_control_packet(self, packet):
+        """Handle incoming control packet"""
+        ptype = packet.get('type')
+        
+        if ptype == 'mouse_move':
+            dx, dy = packet.get('dx', 0), packet.get('dy', 0)
+            if self.config.get('mouse_enabled', True):
+                WindowsInput.move_mouse(dx, dy)
+        
+        elif ptype == 'mouse_click':
+            button = packet.get('button', 'left')
+            down = packet.get('down', True)
+            if self.config.get('mouse_enabled', True):
+                WindowsInput.mouse_click(button, down)
+        
+        elif ptype == 'key_press':
+            key = packet.get('key')
+            down = packet.get('down', True)
+            if self.config.get('keyboard_enabled', True):
+                if down:
+                    WindowsInput.key_down(key)
+                else:
+                    WindowsInput.key_up(key)
+        
+        elif ptype == 'cursor_edge':
+            # Client cursor hit edge, send return control signal
+            self._send_return_control()
+    
+    def _send_return_control(self):
+        """Send signal to server that cursor hit edge"""
+        if not self.server_address:
+            return
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            packet = json.dumps({"type": "return_control"})
+            sock.sendto(packet.encode('utf-8'), self.server_address)
+            sock.close()
+        except Exception as e:
+            logger.error(f"Return control error: {e}")
+    
+    def _clipboard_sync_loop(self):
+        """Sync clipboard with server"""
+        if not self.config.get('clipboard_enabled', False):
+            return
+        
+        try:
+            self.clipboard_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.clipboard_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.clipboard_socket.bind(('0.0.0.0', CLIPBOARD_PORT))
+            self.clipboard_socket.settimeout(1.0)
+            
+            while self.running and self.config.get('clipboard_enabled', False):
+                try:
+                    data, addr = self.clipboard_socket.recvfrom(4096)
                     packet = json.loads(data.decode('utf-8'))
                     
-                    if packet.get('type') == 'mesh_client':
-                        client_id = f"{packet['hostname']}@{packet['ip']}"
-                        self.discovered_clients[client_id] = {
-                            'hostname': packet['hostname'],
-                            'ip': packet['ip'],
-                            'last_seen': datetime.now()
-                        }
-                        logger.info(f"✓ Discovered client: {client_id} from {addr[0]}")
+                    if packet.get('type') == 'clipboard':
+                        content = packet.get('text', '')
+                        pyperclip.copy(content)
+                        logger.debug(f"Clipboard synced: {len(content)} chars")
                 except socket.timeout:
-                    pass
-                except json.JSONDecodeError as e:
-                    logger.debug(f"Invalid discovery packet: {e}")
-                except Exception as e:
-                    logger.warning(f"Error in discovery: {e}")
-                
-                # Clean up stale clients
-                self._cleanup_stale_clients()
-        
+                    continue
         except Exception as e:
-            logger.error(f"Server discovery error: {e}")
-    
-    def _client_discovery_loop(self):
-        """Client broadcasting presence"""
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            
-            hostname = NetworkUtils.get_hostname()
-            local_ip = NetworkUtils.get_local_ip()
-            
-            logger.info(f"Client broadcasting presence: {hostname} at {local_ip}")
-            logger.info(f"Broadcasting to 255.255.255.255:{DISCOVERY_PORT} every {DISCOVERY_INTERVAL}s")
-            
-            broadcast_count = 0
-            while self.running:
-                try:
-                    packet = {
-                        'type': 'mesh_client',
-                        'hostname': hostname,
-                        'ip': local_ip
-                    }
-                    data = json.dumps(packet).encode('utf-8')
-                    self.socket.sendto(data, (BROADCAST_ADDRESS, DISCOVERY_PORT))
-                    broadcast_count += 1
-                    logger.debug(f"Broadcast #{broadcast_count} sent to {BROADCAST_ADDRESS}:{DISCOVERY_PORT}")
-                    time.sleep(DISCOVERY_INTERVAL)
-                except Exception as e:
-                    logger.warning(f"Error broadcasting: {e}")
-                    time.sleep(DISCOVERY_INTERVAL)
-        
-        except Exception as e:
-            logger.error(f"Client discovery error: {e}")
-    
-    def _cleanup_stale_clients(self):
-        """Remove clients that haven't been seen recently"""
-        now = datetime.now()
-        stale = []
-        for client_id, info in self.discovered_clients.items():
-            if (now - info['last_seen']).total_seconds() > CLIENT_HEARTBEAT_TIMEOUT:
-                stale.append(client_id)
-        
-        for client_id in stale:
-            del self.discovered_clients[client_id]
-            logger.debug(f"Removed stale client: {client_id}")
-    
-    def get_discovered_clients(self):
-        """Get list of discovered clients"""
-        self._cleanup_stale_clients()
-        return list(self.discovered_clients.keys())
-
-# ============================================================================
-# CONTROL NETWORKING
-# ============================================================================
-
-class ControlNetwork:
-    """UDP control channel for input forwarding"""
-    
-    def __init__(self, client_ip, role='server'):
-        self.client_ip = client_ip
-        self.role = role
-        self.socket = None
-        self.running = False
-        self.listen_thread = None
-        self.callbacks = {}  # Event type -> callback
-        self.server_ip = None  # For client mode - IP of the server
-    
-    def start(self):
-        """Start control network"""
-        self.running = True
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        if self.role == 'client':
-            # Client listens for control packets from server
-            try:
-                self.socket.bind(('', CONTROL_PORT))
-                self.socket.settimeout(1.0)
-                self.listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
-                self.listen_thread.start()
-                logger.info(f"Client listening on port {CONTROL_PORT} for incoming control packets")
-            except OSError as e:
-                logger.error(f"Failed to bind client to port {CONTROL_PORT}: {e}")
-        else:
-            # Server only sends to clients, doesn't need to bind
-            # It will send return_control packets via a separate mechanism
-            logger.info(f"Server control network ready to send packets to {self.client_ip}")
-    
-    def stop(self):
-        """Stop control network"""
-        self.running = False
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-    
-    def send_control_packet(self, packet):
-        """Send control packet to client"""
-        if not self.socket or self.role != 'server':
-            return
-        
-        try:
-            data = json.dumps(packet).encode('utf-8')
-            self.socket.sendto(data, (self.client_ip, CONTROL_PORT))
-        except Exception as e:
-            logger.warning(f"Error sending control packet: {e}")
-    
-    def send_mouse_move(self, dx, dy):
-        """Send mouse move packet"""
-        self.send_control_packet(['m', dx, dy])
-    
-    def send_mouse_click(self, button='left'):
-        """Send mouse click packet"""
-        self.send_control_packet(['c', button])
-    
-    def send_key_event(self, key, down):
-        """Send keyboard event"""
-        # Serialize the key
-        try:
-            if hasattr(key, 'char'):
-                key_str = key.char or str(key)
-            else:
-                key_str = str(key)
-        except:
-            key_str = str(key)
-        
-        self.send_control_packet(['k', key_str, down])
-    
-    def send_return_control(self):
-        """Send return control packet"""
-        if not self.socket or self.role != 'client':
-            return
-        
-        try:
-            # Send to the server IP if known, otherwise send to host that sent control
-            if self.server_ip:
-                data = json.dumps({'type': 'return_control'}).encode('utf-8')
-                self.socket.sendto(data, (self.server_ip, CONTROL_PORT + 1000))
-            else:
-                # Broadcast as fallback
-                data = json.dumps({'type': 'return_control'}).encode('utf-8')
-                self.socket.sendto(data, (BROADCAST_ADDRESS, CONTROL_PORT + 1000))
-        except Exception as e:
-            logger.debug(f"Error sending return control: {e}")
-    
-    def register_callback(self, event_type, callback):
-        """Register callback for event"""
-        self.callbacks[event_type] = callback
-    
-    def _listen_loop(self):
-        """Listen for incoming control packets"""
-        while self.running:
-            try:
-                data, addr = self.socket.recvfrom(1024)
-                # Track server IP on client side
-                if self.role == 'client' and not self.server_ip:
-                    self.server_ip = addr[0]
-                
-                packet = json.loads(data.decode('utf-8'))
-                self._handle_packet(packet)
-            except socket.timeout:
-                pass
-            except Exception as e:
-                logger.warning(f"Error in listen loop: {e}")
-    
-    def _handle_packet(self, packet):
-        """Handle incoming control packet"""
-        try:
-            if isinstance(packet, list):
-                if packet[0] == 'm':  # Mouse move
-                    dx, dy = packet[1], packet[2]
-                    WindowsInput.move_mouse(int(dx), int(dy))
-                elif packet[0] == 'c':  # Mouse click
-                    button = packet[1] if len(packet) > 1 else 'left'
-                    # Simulate click with down and up
-                    WindowsInput.mouse_click(button, True)
-                    time.sleep(0.05)
-                    WindowsInput.mouse_click(button, False)
-                elif packet[0] == 'k':  # Keyboard
-                    if len(packet) >= 3:
-                        key = packet[1]
-                        down = packet[2]
-                        try:
-                            # Try to convert key to integer (VK code)
-                            vk = int(key) if isinstance(key, int) else ord(key[0].upper()) if key else None
-                            if vk:
-                                if down:
-                                    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-                                else:
-                                    ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
-                        except:
-                            pass
-            elif isinstance(packet, dict):
-                if packet.get('type') == 'return_control':
-                    callback = self.callbacks.get('return_control')
-                    if callback:
-                        callback()
-        except Exception as e:
-            logger.warning(f"Error handling packet: {e}")
-
-# ============================================================================
-# INPUT CAPTURE SYSTEM
-# ============================================================================
-
-class InputCapture:
-    """Captures mouse and keyboard input"""
-    
-    def __init__(self):
-        self.listeners = []
-        self.running = False
-        self.callbacks = {}
-        self.last_mouse_pos = WindowsInput.get_cursor_position()
-    
-    def start(self):
-        """Start capturing input"""
-        self.running = True
-        
-        # Mouse listener
-        mouse_listener = mouse.Listener(
-            on_move=self._on_mouse_move,
-            on_click=self._on_mouse_click,
-            on_scroll=self._on_scroll
-        )
-        mouse_listener.start()
-        self.listeners.append(mouse_listener)
-        
-        # Keyboard listener
-        keyboard_listener = keyboard.Listener(
-            on_press=self._on_key_press,
-            on_release=self._on_key_release
-        )
-        keyboard_listener.start()
-        self.listeners.append(keyboard_listener)
-        
-        logger.info("Input capture started")
-    
-    def stop(self):
-        """Stop capturing input"""
-        self.running = False
-        for listener in self.listeners:
-            try:
-                listener.stop()
-            except:
-                pass
-        self.listeners.clear()
-    
-    def on_mouse_move(self, callback):
-        """Register mouse move callback"""
-        self.callbacks['mouse_move'] = callback
-    
-    def on_mouse_click(self, callback):
-        """Register mouse click callback"""
-        self.callbacks['mouse_click'] = callback
-    
-    def on_key_press(self, callback):
-        """Register key press callback"""
-        self.callbacks['key_press'] = callback
-    
-    def on_key_release(self, callback):
-        """Register key release callback"""
-        self.callbacks['key_release'] = callback
-    
-    def _on_mouse_move(self, x, y):
-        """Internal mouse move handler"""
-        if not self.running:
-            return
-        
-        dx = x - self.last_mouse_pos[0]
-        dy = y - self.last_mouse_pos[1]
-        self.last_mouse_pos = (x, y)
-        
-        callback = self.callbacks.get('mouse_move')
-        if callback:
-            callback(x, y, dx, dy)
-    
-    def _on_mouse_click(self, x, y, button, pressed):
-        """Internal mouse click handler"""
-        if not self.running:
-            return
-        
-        callback = self.callbacks.get('mouse_click')
-        if callback:
-            button_name = str(button).split('.')[-1]
-            callback(x, y, button_name, pressed)
-    
-    def _on_scroll(self, x, y, dx, dy):
-        """Internal scroll handler"""
-        pass
-    
-    def _on_key_press(self, key):
-        """Internal key press handler"""
-        if not self.running:
-            return
-        
-        callback = self.callbacks.get('key_press')
-        if callback:
-            callback(key)
-    
-    def _on_key_release(self, key):
-        """Internal key release handler"""
-        if not self.running:
-            return
-        
-        callback = self.callbacks.get('key_release')
-        if callback:
-            callback(key)
+            logger.error(f"Clipboard sync error: {e}")
 
 # ============================================================================
 # SERVER LOGIC
 # ============================================================================
 
 class ServerController:
-    """Server-side control logic"""
+    """Server mode - captures input and sends to client"""
     
-    def __init__(self, gui):
-        self.gui = gui
-        self.discovery = DiscoveryManager(mode='server')
-        self.input_capture = InputCapture()
-        self.control_networks = {}  # client_id -> ControlNetwork
-        self.connected_clients = []  # List of connected client IDs
-        self.current_control = 'server'  # 'server', 'client_0', 'client_1'
-        self.last_mouse_pos = WindowsInput.get_cursor_position()
-        self.screen_width = 1920  # Will be updated
-        self.screen_height = 1080  # Will be updated
+    def __init__(self, client_ip, config=None):
+        self.client_ip = client_ip
+        self.client_addr = (client_ip, CONTROL_PORT)
+        self.clipboard_addr = (client_ip, CLIPBOARD_PORT)
+        self.config = config or {}
         self.running = False
-        self.return_control_socket = None
-        self.return_control_thread = None
+        self.cursor_in_control = True
+        self.last_clipboard = ""
+        self.control_socket = None
+        self.clipboard_socket = None
+        
+        # Get screen dimensions
+        self.screen_width, self.screen_height = WindowsInput.get_screen_resolution()
+        logger.info(f"Screen resolution: {self.screen_width}x{self.screen_height}")
     
     def start(self):
         """Start server"""
         self.running = True
         
-        # Get screen dimensions
-        try:
-            self.screen_width = self.gui.root.winfo_screenwidth()
-            self.screen_height = self.gui.root.winfo_screenheight()
-        except Exception as e:
-            logger.warning(f"Could not get screen dimensions: {e}")
-            self.screen_width = 1920
-            self.screen_height = 1080
+        # Start input capture
+        input_thread = threading.Thread(target=self._input_capture_loop, daemon=True)
+        input_thread.start()
         
-        self.discovery.start()
-        self.input_capture.start()
+        # Start clipboard sync
+        clipboard_thread = threading.Thread(target=self._clipboard_sync_loop, daemon=True)
+        clipboard_thread.start()
         
-        # Set up input callbacks
-        self.input_capture.on_mouse_move(self._on_mouse_move)
-        self.input_capture.on_mouse_click(self._on_mouse_click)
-        self.input_capture.on_key_press(self._on_key_press)
-        self.input_capture.on_key_release(self._on_key_release)
-        
-        # Start return control listener
-        self._start_return_control_listener()
-        
-        # Schedule GUI updates from main thread
-        if self.gui and hasattr(self.gui, 'root'):
-            try:
-                self.gui.root.after(1000, self._update_gui)
-            except Exception as e:
-                logger.warning(f"Could not schedule GUI update: {e}")
-        
-        logger.info(f"Server started with screen size: {self.screen_width}x{self.screen_height}")
+        logger.info(f"Server started, forwarding to {self.client_ip}")
     
     def stop(self):
         """Stop server"""
         self.running = False
-        self.discovery.stop()
-        self.input_capture.stop()
-        
-        # Stop return control listener
-        if self.return_control_socket:
+        if self.control_socket:
             try:
-                self.return_control_socket.close()
+                self.control_socket.close()
             except:
                 pass
-        
-        for ctrl in self.control_networks.values():
-            ctrl.stop()
-        self.control_networks.clear()
-        logger.info("Server stopped")
-    
-    def connect_client(self, client_id):
-        """Connect to a specific client"""
-        if len(self.connected_clients) >= 2:
-            messagebox.warning("Warning", "Maximum 2 clients connected")
-            return False
-        
-        clients = self.discovery.discovered_clients
-        if client_id not in clients:
-            messagebox.showerror("Error", "Client not found")
-            return False
-        
-        client_ip = clients[client_id]['ip']
-        control = ControlNetwork(client_ip, role='server')
-        control.register_callback('return_control', self._handle_return_control)
-        control.start()
-        
-        self.control_networks[client_id] = control
-        if client_id not in self.connected_clients:
-            self.connected_clients.append(client_id)
-        
-        logger.info(f"Connected to client: {client_id}")
-        return True
-    
-    def connect_client_by_ip(self, ip, client_id):
-        """Connect to a client by manual IP address"""
-        if len(self.connected_clients) >= 2:
-            messagebox.warning("Warning", "Maximum 2 clients connected")
-            return False
-        
-        try:
-            control = ControlNetwork(ip, role='server')
-            control.register_callback('return_control', self._handle_return_control)
-            control.start()
-            
-            self.control_networks[client_id] = control
-            if client_id not in self.connected_clients:
-                self.connected_clients.append(client_id)
-            
-            logger.info(f"Connected to client by IP: {ip}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to {ip}: {e}")
-            return False
-    
-    def disconnect_client(self, client_id):
-        """Disconnect from a client"""
-        if client_id in self.control_networks:
-            self.control_networks[client_id].stop()
-            del self.control_networks[client_id]
-        
-        if client_id in self.connected_clients:
-            self.connected_clients.remove(client_id)
-        
-        logger.info(f"Disconnected from client: {client_id}")
-    
-    def _handle_return_control(self):
-        """Handle return control from client"""
-        # Switch back to the previous control
-        if self.current_control != 'server':
-            if self.current_control == 'client_1':
-                self.current_control = 'client_0'
-            elif self.current_control == 'client_0':
-                self.current_control = 'server'
-            
-            self.gui.update_control_indicator(self.current_control)
-            logger.info(f"Control switched to {self.current_control}")
-    
-    def _start_return_control_listener(self):
-        """Start listening for return control packets from clients"""
-        try:
-            self.return_control_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.return_control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.return_control_socket.bind(('', CONTROL_PORT + 1000))  # Use high port number
-            self.return_control_socket.settimeout(1.0)
-            
-            self.return_control_thread = threading.Thread(
-                target=self._return_control_listen_loop,
-                daemon=True
-            )
-            self.return_control_thread.start()
-            logger.info(f"Server return control listener started on port {CONTROL_PORT + 1000}")
-        except OSError as e:
-            logger.warning(f"Could not start return control listener: {e}")
-    
-    def _return_control_listen_loop(self):
-        """Listen for return control packets from clients"""
-        while self.running:
+        if self.clipboard_socket:
             try:
-                data, addr = self.return_control_socket.recvfrom(1024)
-                packet = json.loads(data.decode('utf-8'))
-                
-                if isinstance(packet, dict) and packet.get('type') == 'return_control':
-                    self._handle_return_control()
-                    logger.debug(f"Received return control from {addr[0]}")
-            except socket.timeout:
+                self.clipboard_socket.close()
+            except:
                 pass
-            except Exception as e:
-                if self.running:
-                    logger.debug(f"Error in return control listen loop: {e}")
     
-    def _on_mouse_move(self, x, y, dx, dy):
-        """Handle mouse movement"""
-        if not self.running or self.current_control == 'server':
-            self.last_mouse_pos = (x, y)
+    def _input_capture_loop(self):
+        """Capture mouse and keyboard input"""
+        try:
+            self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except Exception as e:
+            logger.error(f"Socket creation error: {e}")
             return
         
-        # Check for edge switching
-        if self._check_cursor_edge():
-            return
+        last_pos = WindowsInput.get_cursor_position()
         
-        # Forward to current client
-        if self.current_control.startswith('client_'):
-            client_idx = int(self.current_control.split('_')[1])
-            if client_idx < len(self.connected_clients):
-                client_id = self.connected_clients[client_idx]
-                if client_id in self.control_networks:
-                    self.control_networks[client_id].send_mouse_move(dx, dy)
+        def on_move(x, y):
+            nonlocal last_pos
+            
+            if not self.running or not self.config.get('mouse_enabled', True):
+                return
+            
+            # Check for cursor edge
+            if self._should_transfer_control(x, y):
+                self.cursor_in_control = False
+                WindowsInput.show_cursor(False)  # Hide cursor
+            
+            if not self.cursor_in_control:
+                return
+            
+            # Calculate relative movement
+            dx = x - last_pos[0]
+            dy = y - last_pos[1]
+            last_pos = (x, y)
+            
+            if dx != 0 or dy != 0:
+                packet = json.dumps({"type": "mouse_move", "dx": dx, "dy": dy})
+                try:
+                    self.control_socket.sendto(packet.encode('utf-8'), self.client_addr)
+                except Exception as e:
+                    logger.debug(f"Send error: {e}")
         
-        self.last_mouse_pos = (x, y)
-    
-    def _on_mouse_click(self, x, y, button, pressed):
-        """Handle mouse click"""
-        if not self.running or self.current_control == 'server':
-            return
-        
-        if pressed:
-            # Only forward if we have connection
-            if self.current_control.startswith('client_'):
-                client_idx = int(self.current_control.split('_')[1])
-                if client_idx < len(self.connected_clients):
-                    client_id = self.connected_clients[client_idx]
-                    if client_id in self.control_networks:
-                        self.control_networks[client_id].send_mouse_click(button)
-    
-    def _on_key_press(self, key):
-        """Handle key press"""
-        if not self.running or self.current_control == 'server':
-            return
-        
-        if self.current_control.startswith('client_'):
-            client_idx = int(self.current_control.split('_')[1])
-            if client_idx < len(self.connected_clients):
-                client_id = self.connected_clients[client_idx]
-                if client_id in self.control_networks:
-                    self.control_networks[client_id].send_key_event(key, True)
-    
-    def _on_key_release(self, key):
-        """Handle key release"""
-        if not self.running or self.current_control == 'server':
-            return
-        
-        if self.current_control.startswith('client_'):
-            client_idx = int(self.current_control.split('_')[1])
-            if client_idx < len(self.connected_clients):
-                client_id = self.connected_clients[client_idx]
-                if client_id in self.control_networks:
-                    self.control_networks[client_id].send_key_event(key, False)
-    
-    def _check_cursor_edge(self):
-        """Check if cursor is at edge and switch control"""
-        x, y = self.last_mouse_pos
-        
-        if x >= self.screen_width - CURSOR_EDGE_THRESHOLD:
-            # Moving right - switch to next client
-            if self.current_control == 'server':
-                if len(self.connected_clients) > 0:
-                    self.current_control = 'client_0'
-                    self.gui.update_control_indicator(self.current_control)
-                    return True
-            elif self.current_control == 'client_0':
-                if len(self.connected_clients) > 1:
-                    self.current_control = 'client_1'
-                    self.gui.update_control_indicator(self.current_control)
-                    return True
-            elif self.current_control == 'client_1':
-                self.current_control = 'server'
-                self.gui.update_control_indicator(self.current_control)
-                return True
-        
-        return False
-    
-    def _update_discovered_clients(self):
-        """Update discovered clients in GUI"""
-        clients = self.discovery.get_discovered_clients()
-        self.gui.update_discovered_clients(clients)
-    
-    def _update_gui(self):
-        """Update GUI periodically - must be called from main thread"""
-        if self.running:
+        def on_click(x, y, button, pressed):
+            if not self.running or not self.config.get('mouse_enabled', True):
+                return
+            
+            if not self.cursor_in_control:
+                return
+            
+            button_name = {'left': 'left', 'right': 'right', 'middle': 'middle'}.get(str(button), 'left')
+            packet = json.dumps({"type": "mouse_click", "button": button_name, "down": pressed})
             try:
-                self._update_discovered_clients()
-                # Schedule next update from main thread
-                self.gui.root.after(1000, self._update_gui)
+                self.control_socket.sendto(packet.encode('utf-8'), self.client_addr)
             except Exception as e:
-                logger.warning(f"Error updating GUI: {e}")
-
-# ============================================================================
-# CLIENT LOGIC
-# ============================================================================
-
-class ClientController:
-    """Client-side control logic"""
-    
-    def __init__(self, gui):
-        self.gui = gui
-        self.discovery = DiscoveryManager(mode='client')
-        self.control_network = None
-        self.running = False
-        self.cursor_monitor_thread = None
-    
-    def start(self):
-        """Start client"""
-        self.running = True
-        self.discovery.start()
+                logger.debug(f"Send error: {e}")
         
-        # Set up control network
-        self.control_network = ControlNetwork(
-            client_ip='255.255.255.255',
-            role='client'
-        )
-        self.control_network.register_callback('return_control', self._on_return_control)
-        self.control_network.start()
-        
-        # Start cursor monitoring
-        self.cursor_monitor_thread = threading.Thread(
-            target=self._monitor_cursor,
-            daemon=True
-        )
-        self.cursor_monitor_thread.start()
-        
-        logger.info("Client started")
-    
-    def stop(self):
-        """Stop client"""
-        self.running = False
-        self.discovery.stop()
-        if self.control_network:
-            self.control_network.stop()
-    
-    def _monitor_cursor(self):
-        """Monitor cursor position for edge detection"""
-        last_send_time = time.time()
-        
-        while self.running:
+        def on_key(key, pressed):
+            if not self.running or not self.config.get('keyboard_enabled', True):
+                return
+            
+            if not self.cursor_in_control:
+                return
+            
             try:
-                x, y = WindowsInput.get_cursor_position()
-                
-                # Check if cursor reached left edge
-                if x <= CURSOR_EDGE_THRESHOLD:
-                    # Send return control with throttling
-                    if time.time() - last_send_time > 0.5:
-                        if self.control_network:
-                            self.control_network.send_return_control()
-                        last_send_time = time.time()
-                
-                time.sleep(0.05)
+                key_str = str(key).replace("'", "")
+                packet = json.dumps({"type": "key_press", "key": key_str, "down": pressed})
+                self.control_socket.sendto(packet.encode('utf-8'), self.client_addr)
             except Exception as e:
-                logger.warning(f"Error in cursor monitor: {e}")
+                logger.debug(f"Send error: {e}")
+        
+        with mouse.Listener(on_move=on_move, on_click=on_click) as m_listener:
+            with keyboard.Listener(on_press=on_key, on_release=on_key) as k_listener:
+                while self.running:
+                    time.sleep(0.01)
     
-    def _on_return_control(self):
-        """Handle control return from server"""
-        logger.info("Control returned to server")
+    def _should_transfer_control(self, x, y):
+        """Check if cursor hit edge and should transfer control"""
+        client_pos = self.config.get('client_position', 'right')
+        
+        if client_pos == 'right':
+            return x >= (self.screen_width - CURSOR_EDGE_THRESHOLD)
+        else:  # left
+            return x <= CURSOR_EDGE_THRESHOLD
+    
+    def _clipboard_sync_loop(self):
+        """Sync clipboard to client"""
+        if not self.config.get('clipboard_enabled', False):
+            return
+        
+        try:
+            self.clipboard_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except Exception as e:
+            logger.error(f"Clipboard socket error: {e}")
+            return
+        
+        while self.running and self.config.get('clipboard_enabled', False):
+            try:
+                current = pyperclip.paste()
+                if current != self.last_clipboard:
+                    self.last_clipboard = current
+                    packet = json.dumps({"type": "clipboard", "text": current})
+                    self.clipboard_socket.sendto(packet.encode('utf-8'), self.clipboard_addr)
+                    logger.debug(f"Clipboard sent: {len(current)} chars")
+            except Exception as e:
+                logger.debug(f"Clipboard error: {e}")
+            
+            time.sleep(CLIPBOARD_CHECK_INTERVAL)
 
 # ============================================================================
-# TKINTER GUI
+# GUI
 # ============================================================================
 
 class MeshControlGUI:
-    """Tkinter GUI for Mesh Control"""
+    """Main GUI application"""
     
     def __init__(self, root):
         self.root = root
         self.root.title("Mesh Control")
-        self.root.geometry("600x700")
-        self.root.resizable(False, False)
+        self.root.geometry("500x600")
         
         self.server = None
         self.client = None
         self.running_mode = None
+        self.connected = False
         
+        self._setup_style()
         self._setup_ui()
     
+    def _setup_style(self):
+        """Configure ttk theme"""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Dark theme colors
+        bg_color = "#1e1e1e"
+        fg_color = "#ffffff"
+        accent1 = "#0066cc"  # Blue
+        accent2 = "#9933cc"  # Purple
+        
+        self.root.configure(bg=bg_color)
+        
+        style.configure('TFrame', background=bg_color)
+        style.configure('TLabel', background=bg_color, foreground=fg_color)
+        style.configure('TButton', background=accent1, foreground=fg_color)
+        style.configure('Header.TLabel', font=('Arial', 18, 'bold'), foreground=accent1)
+        style.configure('Status.TLabel', font=('Arial', 12, 'bold'))
+        style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
+    
     def _setup_ui(self):
-        """Set up UI components"""
-        # Create a scrollable frame for everything
-        main_canvas = tk.Canvas(self.root)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
-        scrollable_frame = ttk.Frame(main_canvas)
+        """Build UI"""
+        # Header
+        header_frame = ttk.Frame(self.root)
+        header_frame.pack(fill=tk.X, padx=20, pady=20)
         
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
-        )
-        
-        main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        main_canvas.configure(yscrollcommand=scrollbar.set)
-        
-        main_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Title
-        title_frame = ttk.Frame(scrollable_frame)
-        title_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        title_label = ttk.Label(title_frame, text="Mesh Control", 
-                               font=("Arial", 16, "bold"))
+        title_label = ttk.Label(header_frame, text="Mesh Control", style='Header.TLabel')
         title_label.pack()
         
-        # Mode Selection
-        mode_frame = ttk.LabelFrame(scrollable_frame, text="Mode Selection", padding=10)
-        mode_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Status indicator
+        self.status_frame = ttk.Frame(header_frame)
+        self.status_frame.pack(pady=10)
+        
+        self.status_indicator = tk.Canvas(self.status_frame, width=20, height=20, bg="#1e1e1e", highlightthickness=0)
+        self.status_indicator.pack(side=tk.LEFT, padx=5)
+        self.status_indicator.create_oval(2, 2, 18, 18, fill="#ff4444", outline="#ff4444")
+        
+        self.status_label = ttk.Label(self.status_frame, text="Disconnected", style='Status.TLabel')
+        self.status_label.pack(side=tk.LEFT)
+        
+        # Mode selection
+        mode_frame = ttk.LabelFrame(self.root, text="Mode", padding=10)
+        mode_frame.pack(fill=tk.X, padx=20, pady=10)
         
         self.mode_var = tk.StringVar(value="server")
-        ttk.Radiobutton(mode_frame, text="Server", variable=self.mode_var, 
-                       value="server").pack(anchor=tk.W)
-        ttk.Radiobutton(mode_frame, text="Client", variable=self.mode_var, 
-                       value="client").pack(anchor=tk.W)
         
-        # Status Area
-        status_frame = ttk.LabelFrame(scrollable_frame, text="Status", padding=10)
-        status_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Radiobutton(mode_frame, text="Server (Control client)", variable=self.mode_var, 
+                       value="server", command=self._on_mode_changed).pack(anchor=tk.W)
+        ttk.Radiobutton(mode_frame, text="Client (Be controlled)", variable=self.mode_var,
+                       value="client", command=self._on_mode_changed).pack(anchor=tk.W)
         
-        self.status_label = ttk.Label(status_frame, text="Stopped", 
-                                     font=("Arial", 10))
-        self.status_label.pack(anchor=tk.W)
+        # Connection section
+        self.conn_frame = ttk.LabelFrame(self.root, text="Connection", padding=10)
+        self.conn_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        # Connection Status
-        conn_frame = ttk.LabelFrame(scrollable_frame, text="Connection Status", padding=10)
-        conn_frame.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(self.conn_frame, text="Client IP Address:").pack(anchor=tk.W)
         
-        self.conn_status_label = ttk.Label(conn_frame, text="Not connected")
-        self.conn_status_label.pack(anchor=tk.W)
+        ip_entry_frame = ttk.Frame(self.conn_frame)
+        ip_entry_frame.pack(fill=tk.X, pady=5)
         
-        # Network Info (Diagnostic)
-        self.network_info_label = ttk.Label(conn_frame, text="", font=("Arial", 8), foreground="gray")
-        self.network_info_label.pack(anchor=tk.W)
+        self.client_ip_var = tk.StringVar()
+        self.client_ip_entry = ttk.Entry(ip_entry_frame, textvariable=self.client_ip_var, width=20)
+        self.client_ip_entry.pack(side=tk.LEFT, padx=5)
         
-        # Manual IP Connection
-        manual_ip_frame = ttk.LabelFrame(scrollable_frame, text="Manual Client IP Connection", padding=10)
-        manual_ip_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.connect_btn = ttk.Button(ip_entry_frame, text="Connect", command=self._on_connect)
+        self.connect_btn.pack(side=tk.LEFT)
         
-        ip_input_frame = ttk.Frame(manual_ip_frame)
-        ip_input_frame.pack(fill=tk.X, pady=5)
+        # Status display
+        self.conn_status_label = ttk.Label(self.conn_frame, text="", foreground="blue")
+        self.conn_status_label.pack(anchor=tk.W, pady=5)
         
-        ttk.Label(ip_input_frame, text="Client IP:").pack(side=tk.LEFT, padx=5)
-        self.manual_ip_var = tk.StringVar()
-        self.manual_ip_entry = ttk.Entry(ip_input_frame, textvariable=self.manual_ip_var, width=20)
-        self.manual_ip_entry.pack(side=tk.LEFT, padx=5)
+        # Configuration section
+        self.config_frame = ttk.LabelFrame(self.root, text="Configuration", padding=10)
+        self.config_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
-        self.connect_ip_btn = ttk.Button(manual_ip_frame, text="Connect by IP",
-                                        command=self._on_connect_by_ip,
-                                        state=tk.DISABLED)
-        self.connect_ip_btn.pack(pady=5)
+        ttk.Label(self.config_frame, text="Client Position:").pack(anchor=tk.W, pady=5)
         
-        self.manual_ip_status_label = ttk.Label(manual_ip_frame, text="", 
-                                               font=("Arial", 8), foreground="blue")
-        self.manual_ip_status_label.pack(anchor=tk.W)
+        position_frame = ttk.Frame(self.config_frame)
+        position_frame.pack(anchor=tk.W, padx=20)
         
-        # Discovered Clients
-        clients_frame = ttk.LabelFrame(scrollable_frame, text="Discovered Clients", padding=10)
-        clients_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.client_position = tk.StringVar(value="right")
+        ttk.Radiobutton(position_frame, text="Right", variable=self.client_position, 
+                       value="right").pack(anchor=tk.W)
+        ttk.Radiobutton(position_frame, text="Left", variable=self.client_position,
+                       value="left").pack(anchor=tk.W)
         
-        # Listbox with scrollbar
-        scrollbar = ttk.Scrollbar(clients_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Feature toggles
+        ttk.Separator(self.config_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
         
-        self.clients_listbox = tk.Listbox(clients_frame, yscrollcommand=scrollbar.set, height=6)
-        self.clients_listbox.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.clients_listbox.yview)
+        self.keyboard_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.config_frame, text="Enable keyboard sharing", 
+                       variable=self.keyboard_var).pack(anchor=tk.W, pady=3)
         
-        self.discovery_timeout_label = ttk.Label(clients_frame, text="", 
-                                                 font=("Arial", 8), foreground="orange")
-        self.discovery_timeout_label.pack(anchor=tk.W)
+        self.clipboard_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.config_frame, text="Enable clipboard sharing",
+                       variable=self.clipboard_var).pack(anchor=tk.W, pady=3)
         
-        # Client Network Settings
-        client_settings_frame = ttk.LabelFrame(scrollable_frame, text="Client Network Settings", padding=10)
-        client_settings_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.mouse_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.config_frame, text="Enable mouse sharing",
+                       variable=self.mouse_var).pack(anchor=tk.W, pady=3)
         
-        self.client_ip_label = ttk.Label(client_settings_frame, text="IP Address: Not set")
-        self.client_ip_label.pack(anchor=tk.W)
+        # Control buttons
+        button_frame = ttk.Frame(self.root)
+        button_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        self.client_adapter_label = ttk.Label(client_settings_frame, text="Network Adapter: Unknown")
-        self.client_adapter_label.pack(anchor=tk.W)
-        
-        self.discovery_mode_label = ttk.Label(client_settings_frame, text="Discovery Mode: Disabled")
-        self.discovery_mode_label.pack(anchor=tk.W)
-        
-        self.enable_discovery_btn = ttk.Button(client_settings_frame, text="Enable Discovery Mode",
-                                              command=self._on_enable_discovery,
-                                              state=tk.DISABLED)
-        self.enable_discovery_btn.pack(pady=5)
-        
-        # Server Diagnostics
-        server_diag_frame = ttk.LabelFrame(scrollable_frame, text="Server Network Diagnostics", padding=10)
-        server_diag_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        self.server_ip_label = ttk.Label(server_diag_frame, text="Server IP: Not set")
-        self.server_ip_label.pack(anchor=tk.W)
-        
-        self.server_subnet_label = ttk.Label(server_diag_frame, text="Subnet Mask: Unknown")
-        self.server_subnet_label.pack(anchor=tk.W)
-        
-        diag_button_frame = ttk.Frame(server_diag_frame)
-        diag_button_frame.pack(fill=tk.X, pady=10)
-        
-        self.scan_network_btn = ttk.Button(diag_button_frame, text="Scan Network",
-                                          command=self._on_scan_network,
-                                          state=tk.DISABLED)
-        self.scan_network_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.ping_client_btn = ttk.Button(diag_button_frame, text="Ping Selected",
-                                         command=self._on_ping_selected,
-                                         state=tk.DISABLED)
-        self.ping_client_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.show_network_info_btn = ttk.Button(diag_button_frame, text="Network Info",
-                                               command=self._on_show_network_info)
-        self.show_network_info_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.diag_status_label = ttk.Label(server_diag_frame, text="", 
-                                          font=("Arial", 8), foreground="green")
-        self.diag_status_label.pack(anchor=tk.W)
-        
-        # Control Indicator
-        control_frame = ttk.LabelFrame(scrollable_frame, text="Current Control", padding=10)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        self.control_label = ttk.Label(control_frame, text="Server", 
-                                      font=("Arial", 11, "bold"),
-                                      foreground="green")
-        self.control_label.pack()
-        
-        # Buttons
-        button_frame = ttk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        self.start_btn = ttk.Button(button_frame, text="Start",
-                                   command=self._on_start)
+        self.start_btn = ttk.Button(button_frame, text="Start", command=self._on_start)
         self.start_btn.pack(side=tk.LEFT, padx=5)
         
-        self.stop_btn = ttk.Button(button_frame, text="Stop", command=self._on_stop,
-                                  state=tk.DISABLED)
+        self.stop_btn = ttk.Button(button_frame, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
         
-        self.connect_btn = ttk.Button(button_frame, text="Connect Selected",
-                                     command=self._on_connect_client,
-                                     state=tk.DISABLED)
-        self.connect_btn.pack(side=tk.LEFT, padx=5)
+        # Disable config initially
+        self._set_config_enabled(False)
+    
+    def _on_mode_changed(self):
+        """Handle mode change"""
+        mode = self.mode_var.get()
         
-        self.diag_btn = ttk.Button(button_frame, text="Network Diagnostics",
-                                  command=self._on_diagnostics)
-        self.diag_btn.pack(side=tk.LEFT, padx=5)
+        if mode == "server":
+            self.conn_frame.config(text="Connection (Enter client IP)")
+            self.client_ip_entry.config(state=tk.NORMAL)
+            self.connect_btn.config(state=tk.NORMAL)
+            self._set_config_enabled(False)
+        else:
+            self.conn_frame.config(text="Connection (Listen for server)")
+            self.client_ip_entry.config(state=tk.DISABLED)
+            self.connect_btn.config(state=tk.DISABLED)
+            self._set_config_enabled(False)
+    
+    def _set_config_enabled(self, enabled):
+        """Enable/disable config section"""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        
+        for child in self.config_frame.winfo_children():
+            if isinstance(child, ttk.Checkbutton) or isinstance(child, ttk.Radiobutton):
+                child.config(state=state)
+    
+    def _on_connect(self):
+        """Connect to client (server mode)"""
+        client_ip = self.client_ip_var.get().strip()
+        
+        if not client_ip:
+            messagebox.showerror("Error", "Please enter client IP address")
+            return
+        
+        # Verify we can reach the client
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(2)
+            sock.sendto(b"ping", (client_ip, CONTROL_PORT))
+            sock.close()
+            
+            self.conn_status_label.config(
+                text=f"Connected to: {client_ip}",
+                foreground="green"
+            )
+            self.connected = True
+            self._set_config_enabled(True)
+            self.client_ip_entry.config(state=tk.DISABLED)
+            self.connect_btn.config(state=tk.DISABLED)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to connect to {client_ip}:\n{e}")
+            self.connected = False
     
     def _on_start(self):
-        """Start based on mode selection"""
+        """Start server or client"""
         mode = self.mode_var.get()
-        if mode == 'server':
-            self._on_start_server()
+        
+        if mode == "server":
+            if not self.connected:
+                messagebox.showerror("Error", "Please connect to a client first")
+                return
+            
+            self._start_server()
         else:
-            self._on_start_client()
+            self._start_client()
     
-    def _on_start_server(self):
-        """Start server"""
-        self.server = ServerController(self)
+    def _start_server(self):
+        """Start server mode"""
+        client_ip = self.client_ip_var.get()
+        
+        config = {
+            'client_position': self.client_position.get(),
+            'keyboard_enabled': self.keyboard_var.get(),
+            'clipboard_enabled': self.clipboard_var.get(),
+            'mouse_enabled': self.mouse_var.get(),
+        }
+        
+        self.server = ServerController(client_ip, config)
         self.server.start()
-        self.running_mode = 'server'
+        self.running_mode = "server"
         
-        # Show network info
-        server_ip = NetworkUtils.get_local_ip()
-        self.network_info_label.config(
-            text=f"Server IP: {server_ip} | Discovery Port: {DISCOVERY_PORT} | Listening for clients..."
-        )
-        self.server_ip_label.config(text=f"Server IP: {server_ip}")
-        
-        self.status_label.config(text="Server running...")
+        self._update_status("Server Running", True)
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.connect_btn.config(state=tk.NORMAL)
-        self.scan_network_btn.config(state=tk.NORMAL)
-        self.ping_client_btn.config(state=tk.NORMAL)
-        self.connect_ip_btn.config(state=tk.NORMAL)
+        self.connect_btn.config(state=tk.DISABLED)
+        self.mode_var_widget = tk.StringVar(value="server")
         
-        # Disable mode selection
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Radiobutton):
-                        subchild.config(state=tk.DISABLED)
-        
-        # Start 5-second discovery timeout
-        self.discovery_timeout_label.config(text="Scanning for clients (5 sec)...", foreground="blue")
-        self.root.after(5000, self._check_discovery_timeout)
-        
-        logger.info("Server mode activated")
+        logger.info(f"Server started, controlling {client_ip}")
     
-    def _on_start_client(self):
-        """Start client"""
-        self.client = ClientController(self)
+    def _start_client(self):
+        """Start client mode"""
+        config = {
+            'keyboard_enabled': self.keyboard_var.get(),
+            'clipboard_enabled': self.clipboard_var.get(),
+            'mouse_enabled': self.mouse_var.get(),
+        }
+        
+        self.client = ClientController(config)
         self.client.start()
-        self.running_mode = 'client'
+        self.running_mode = "client"
         
-        # Show network info
-        client_ip = NetworkUtils.get_local_ip()
-        hostname = NetworkUtils.get_hostname()
-        self.network_info_label.config(
-            text=f"Client IP: {client_ip} | Hostname: {hostname} | Broadcasting..."
-        )
-        self.client_ip_label.config(text=f"IP Address: {client_ip}")
-        self.discovery_mode_label.config(text=f"Discovery Mode: Enabled", foreground="green")
-        self.enable_discovery_btn.config(state=tk.NORMAL)
-        
-        self.status_label.config(text="Client running...")
+        self._update_status("Client Running", True)
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         
-        # Disable mode selection
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Radiobutton):
-                        subchild.config(state=tk.DISABLED)
-        
-        logger.info("Client mode activated")
+        logger.info("Client started, listening for control...")
     
     def _on_stop(self):
-        """Stop server/client"""
+        """Stop server or client"""
         if self.server:
             self.server.stop()
             self.server = None
@@ -1231,258 +765,31 @@ class MeshControlGUI:
             self.client = None
         
         self.running_mode = None
-        self.status_label.config(text="Stopped")
-        self.network_info_label.config(text="")
-        self.conn_status_label.config(text="Not connected")
-        self.manual_ip_status_label.config(text="")
-        self.discovery_timeout_label.config(text="")
-        self.diag_status_label.config(text="")
-        self.client_ip_label.config(text="IP Address: Not set")
-        self.discovery_mode_label.config(text="Discovery Mode: Disabled")
-        self.server_ip_label.config(text="Server IP: Not set")
-        self.server_subnet_label.config(text="Subnet Mask: Unknown")
+        self.connected = False
         
+        self._update_status("Disconnected", False)
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.connect_btn.config(state=tk.DISABLED)
-        self.scan_network_btn.config(state=tk.DISABLED)
-        self.ping_client_btn.config(state=tk.DISABLED)
-        self.connect_ip_btn.config(state=tk.DISABLED)
-        self.enable_discovery_btn.config(state=tk.DISABLED)
+        self.connect_btn.config(state=tk.NORMAL)
+        self.client_ip_entry.config(state=tk.NORMAL)
+        self.conn_status_label.config(text="")
         
-        # Re-enable mode selection
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Radiobutton):
-                        subchild.config(state=tk.NORMAL)
-        
-        self.clients_listbox.delete(0, tk.END)
-        
+        self._set_config_enabled(False)
         logger.info("Stopped")
     
-    def _on_connect_client(self):
-        """Connect to selected client"""
-        if not self.server:
-            messagebox.showerror("Error", "Server not running")
-            return
-        
-        selection = self.clients_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a client")
-            return
-        
-        client_id = self.clients_listbox.get(selection[0])
-        if self.server.connect_client(client_id):
-            self.conn_status_label.config(
-                text=f"Connected to: {client_id}"
-            )
-            messagebox.showinfo("Success", f"Connected to {client_id}")
-    
-    def update_discovered_clients(self, clients):
-        """Update the list of discovered clients"""
-        current_selection = self.clients_listbox.curselection()
-        current_items = set(self.clients_listbox.get(0, tk.END))
-        new_items = set(clients)
-        
-        # Only update if there are changes
-        if current_items != new_items:
-            self.clients_listbox.delete(0, tk.END)
-            for client in sorted(clients):
-                self.clients_listbox.insert(tk.END, client)
-    
-    def update_control_indicator(self, control):
-        """Update control indicator"""
-        control_text = {
-            'server': 'Server',
-            'client_0': 'Client 1',
-            'client_1': 'Client 2'
-        }.get(control, control)
-        
-        self.control_label.config(text=control_text)
-    
-    def _on_diagnostics(self):
-        """Show network diagnostics dialog"""
-        import subprocess
-        
-        diag_info = "=== Mesh Control Network Diagnostics ===\n\n"
-        
-        # Get local IP
-        local_ip = NetworkUtils.get_local_ip()
-        hostname = NetworkUtils.get_hostname()
-        diag_info += f"Your Computer:\n"
-        diag_info += f"  Hostname: {hostname}\n"
-        diag_info += f"  IP Address: {local_ip}\n\n"
-        
-        # Try to get full network info
-        try:
-            result = subprocess.run(
-                ['ipconfig'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            diag_info += "Full Network Configuration:\n"
-            # Filter to show only relevant info
-            lines = result.stdout.split('\n')
-            for i, line in enumerate(lines):
-                if any(x in line for x in ['Adapter', 'IPv4', 'Subnet Mask', 'Default Gateway', 'DHCP']):
-                    diag_info += line + "\n"
-        except Exception as e:
-            diag_info += f"Could not retrieve full config: {e}\n"
-        
-        diag_info += f"\n=== Mesh Control Config ===\n"
-        diag_info += f"Discovery Port: {DISCOVERY_PORT}\n"
-        diag_info += f"Control Port: {CONTROL_PORT}\n"
-        diag_info += f"Return Control Port: {CONTROL_PORT + 1000}\n"
-        diag_info += f"Broadcast Address: {BROADCAST_ADDRESS}\n"
-        
-        # Show in messagebox
-        messagebox.showinfo("Network Diagnostics", diag_info)
-    
-    def _on_connect_by_ip(self):
-        """Connect to a client using manual IP address"""
-        ip = self.manual_ip_var.get().strip()
-        
-        if not ip:
-            messagebox.showwarning("Warning", "Please enter a client IP address")
-            return
-        
-        # Validate IP format
-        parts = ip.split('.')
-        if len(parts) != 4 or not all(part.isdigit() for part in parts):
-            messagebox.showerror("Error", "Invalid IP address format")
-            return
-        
-        if not self.server:
-            messagebox.showerror("Error", "Server not running")
-            return
-        
-        try:
-            # Create a fake client entry for manual connection
-            client_id = f"Manual-{ip}"
-            if self.server.connect_client_by_ip(ip, client_id):
-                self.manual_ip_status_label.config(
-                    text=f"✓ Connected to {ip}",
-                    foreground="green"
-                )
-                messagebox.showinfo("Success", f"Connected to {ip}")
-            else:
-                self.manual_ip_status_label.config(
-                    text=f"✗ Failed to connect to {ip}",
-                    foreground="red"
-                )
-                messagebox.showerror("Error", f"Failed to connect to {ip}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Connection error: {e}")
-            logger.error(f"Manual IP connection error: {e}")
-    
-    def _on_enable_discovery(self):
-        """Enable/toggle client discovery broadcasting"""
-        if not self.client:
-            messagebox.showerror("Error", "Client not running")
-            return
-        
-        # For now, discovery is automatically enabled
-        # This button could be used to restart discovery or show status
-        messagebox.showinfo("Discovery Mode", "Client is broadcasting its presence every 2 seconds")
-    
-    def _on_scan_network(self):
-        """Rescan the network for clients"""
-        if not self.server:
-            messagebox.showwarning("Warning", "Server not running")
-            return
-        
-        self.diag_status_label.config(text="Scanning network...", foreground="blue")
-        self.server.discovery.discovered_clients.clear()
-        self.clients_listbox.delete(0, tk.END)
-        
-        # The discovery manager will find clients automatically
-        # Give it 3 seconds to discover
-        self.root.after(3000, self._scan_complete)
-    
-    def _scan_complete(self):
-        """Called when scan completes"""
-        clients = self.server.discovery.get_discovered_clients()
-        if clients:
-            self.diag_status_label.config(text=f"✓ Found {len(clients)} client(s)", foreground="green")
-        else:
-            self.diag_status_label.config(text="✗ No clients found", foreground="orange")
-    
-    def _on_ping_selected(self):
-        """Ping the selected client in the listbox"""
-        selection = self.clients_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a client first")
-            return
-        
-        client_id = self.clients_listbox.get(selection[0])
-        clients = self.server.discovery.discovered_clients
-        
-        if client_id not in clients:
-            messagebox.showerror("Error", "Client not found")
-            return
-        
-        client_ip = clients[client_id]['ip']
-        self.diag_status_label.config(text=f"Pinging {client_ip}...", foreground="blue")
-        self.root.update()
-        
-        try:
-            result = subprocess.run(
-                ['ping', '-n', '1', client_ip],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                self.diag_status_label.config(
-                    text=f"✓ {client_id} is reachable",
-                    foreground="green"
-                )
-                messagebox.showinfo("Ping Result", f"✓ {client_ip} is reachable")
-            else:
-                self.diag_status_label.config(
-                    text=f"✗ {client_id} is unreachable",
-                    foreground="red"
-                )
-                messagebox.showwarning("Ping Result", f"✗ {client_ip} is unreachable (100% packet loss)")
-        except Exception as e:
-            messagebox.showerror("Error", f"Ping failed: {e}")
-            logger.error(f"Ping error: {e}")
-    
-    def _on_show_network_info(self):
-        """Show detailed network information"""
-        try:
-            result = subprocess.run(
-                ['ipconfig', '/all'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            info = "Network Configuration (extract):\n\n"
-            lines = result.stdout.split('\n')
-            
-            in_adapter = False
-            for line in lines:
-                if 'adapter' in line.lower():
-                    in_adapter = True
-                    info += f"\n{line}\n"
-                elif in_adapter and any(x in line for x in ['IPv4', 'Subnet Mask', 'Default Gateway', 'DHCP']):
-                    info += line + "\n"
-                elif in_adapter and line.strip() == "":
-                    in_adapter = False
-            
-            messagebox.showinfo("Network Information", info)
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not retrieve network info: {e}")
+    def _update_status(self, text, connected):
+        """Update status indicator"""
+        self.status_label.config(text=text)
+        color = "#44ff44" if connected else "#ff4444"
+        self.status_indicator.delete("all")
+        self.status_indicator.create_oval(2, 2, 18, 18, fill=color, outline=color)
 
 # ============================================================================
-# MAIN APPLICATION
+# MAIN
 # ============================================================================
 
 def main():
-    """Main application entry point"""
+    """Main entry point"""
     root = tk.Tk()
     app = MeshControlGUI(root)
     root.mainloop()
