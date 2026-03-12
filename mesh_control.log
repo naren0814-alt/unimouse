@@ -63,3 +63,7 @@
 2026-03-12 20:48:13,462 - __main__ - INFO - Client listening on port 16060 for incoming control packets
 2026-03-12 20:48:13,478 - __main__ - INFO - Client started
 2026-03-12 20:48:13,478 - __main__ - INFO - Client mode activated
+2026-03-12 21:06:14,165 - __main__ - INFO - Screen resolution: 1536x864
+2026-03-12 21:06:14,165 - __main__ - INFO - Server started, forwarding to 10.59.219.76
+2026-03-12 21:06:14,181 - __main__ - INFO - Server started, controlling 10.59.219.76
+2026-03-12 21:08:13,125 - __main__ - INFO - Stopped
