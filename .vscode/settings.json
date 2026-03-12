@@ -1,8 +1,0 @@
-{
-    "chat.tools.terminal.autoApprove": {
-        "/^python -c \"import mesh_control_gui; print\\('Import successful'\\)\"$/": {
-            "approve": true,
-            "matchCommandLine": true
-        }
-    }
-}
