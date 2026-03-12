@@ -1,0 +1,12 @@
+2026-03-12 18:48:33,026 - __main__ - INFO - Discovery manager started
+2026-03-12 18:48:33,026 - __main__ - ERROR - Server discovery error: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions
+2026-03-12 18:48:33,042 - __main__ - INFO - Input capture started
+2026-03-12 18:48:35,198 - __main__ - INFO - Discovery manager started
+2026-03-12 18:48:35,198 - __main__ - ERROR - Server discovery error: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions
+2026-03-12 18:48:35,209 - __main__ - INFO - Input capture started
+2026-03-12 18:48:35,714 - __main__ - INFO - Discovery manager started
+2026-03-12 18:48:35,714 - __main__ - ERROR - Server discovery error: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions
+2026-03-12 18:48:35,721 - __main__ - INFO - Input capture started
+2026-03-12 18:49:38,571 - __main__ - INFO - Discovery manager started
+2026-03-12 18:49:38,587 - __main__ - ERROR - Server discovery error: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions
+2026-03-12 18:49:38,594 - __main__ - INFO - Input capture started
